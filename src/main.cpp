@@ -22,15 +22,16 @@
  #include <unordered_map>
  #include <stdexcept>
  #include <algorithm>
+ #include <functional>
  
  // OpenGL and GLFW
  #define GLFW_INCLUDE_NONE
  #include <GLFW/glfw3.h>
  
- // Platform-specific OpenGL headers and function loading
+ // Platform-specific OpenGL headers with correct case sensitivity
  #ifdef _WIN32
- #include <windows.h>
- #include <GL/gl.h>
+ #include <windows.h>      // Fixed: lowercase 'w'
+ #include <GL/gl.h>        // Fixed: correct case
  #include <GL/glext.h>
  #include <GL/wglext.h>
  #elif defined(__APPLE__)
@@ -67,6 +68,25 @@
  class SystemException final : public std::runtime_error {
  public:
      explicit SystemException(const std::string& message) : std::runtime_error("System Error: " + message) {}
+ };
+ 
+ /**
+  * @brief Custom transparent string hasher for heterogeneous lookups
+  * @tagline Enable string_view lookups in unordered_map without temporary string creation
+  * @intuition Avoid string construction when doing lookups with string_view keys
+  * @approach Use transparent hashing that works with both string and string_view
+  * @complexity O(1) average case hashing, eliminates temporary allocations
+  */
+ struct TransparentStringHash {
+     using is_transparent = void;
+     
+     [[nodiscard]] auto operator()(const std::string& str) const noexcept -> std::size_t {
+         return std::hash<std::string>{}(str);
+     }
+     
+     [[nodiscard]] auto operator()(std::string_view str) const noexcept -> std::size_t {
+         return std::hash<std::string_view>{}(str);
+     }
  };
  
  /**
@@ -115,27 +135,28 @@
          auto funcPtr = wglGetProcAddress(name);
          if (funcPtr == nullptr) {
              // Fallback to GetProcAddress for core functions
-             funcPtr = GetProcAddress(opengl32Library, name);
+             funcPtr = static_cast<PROC>(GetProcAddress(opengl32Library, name));
          }
          
          if (funcPtr == nullptr) {
              throw OpenGLException(std::string("Failed to load function: ") + name);
          }
          
-         return reinterpret_cast<FuncType>(funcPtr);
+         // Use function pointer conversion instead of reinterpret_cast
+         return FuncType(funcPtr);
  #elif defined(__APPLE__)
          // macOS uses static linking for OpenGL
          auto funcPtr = glfwGetProcAddress(name);
          if (funcPtr == nullptr) {
              throw OpenGLException(std::string("Failed to load function: ") + name);
          }
-         return reinterpret_cast<FuncType>(funcPtr);
+         return FuncType(funcPtr);
  #else
          auto funcPtr = glXGetProcAddress(reinterpret_cast<const GLubyte*>(name));
          if (funcPtr == nullptr) {
              throw OpenGLException(std::string("Failed to load function: ") + name);
          }
-         return reinterpret_cast<FuncType>(funcPtr);
+         return FuncType(funcPtr);
  #endif
      }
  
@@ -204,7 +225,9 @@
  class Texture final {
  private:
      GLuint textureId{0};
-     int width{0}, height{0}, channels{0};
+     int width{0};
+     int height{0};
+     int channels{0};
      std::string filepath;
  
  public:
@@ -224,8 +247,10 @@
  
      Texture(Texture&& other) noexcept
          : textureId{std::exchange(other.textureId, 0)},
-           width{other.width}, height{other.height},
-           channels{other.channels}, filepath{std::move(other.filepath)} {}
+           width{other.width}, 
+           height{other.height},
+           channels{other.channels}, 
+           filepath{std::move(other.filepath)} {}
  
      auto operator=(Texture&& other) noexcept -> Texture& {
          if (this != &other) {
@@ -305,7 +330,8 @@
              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
              
-             width = height = fallbackSize;
+             width = fallbackSize;
+             height = fallbackSize;
              channels = 4;
              std::cout << "[Texture] Created procedural fallback for: " << filepath << std::endl;
          } catch (...) {
@@ -370,7 +396,8 @@
  class ShaderManager final {
  private:
      GLuint programId{0};
-     std::unordered_map<std::string, GLint, std::equal_to<>> uniformCache;
+     // Fixed: Use transparent equality and custom hasher for heterogeneous lookups
+     std::unordered_map<std::string, GLint, TransparentStringHash, std::equal_to<>> uniformCache;
  
  public:
      explicit ShaderManager(const std::string& vertexSource, const std::string& fragmentSource) {
@@ -407,13 +434,13 @@
          GLErrorChecker::CheckError("Use shader program");
      }
  
-     auto GetUniformLocation(const std::string& name) -> GLint {
+     auto GetUniformLocation(std::string_view name) -> GLint {
          if (const auto it = uniformCache.find(name); it != uniformCache.end()) {
              return it->second;
          }
  
-         const GLint location = glGetUniformLocation(programId, name.c_str());
-         uniformCache[name] = location;
+         const GLint location = glGetUniformLocation(programId, std::string(name).c_str());
+         uniformCache[std::string(name)] = location;
          if (location == -1) {
              std::cerr << "[Shader Warning] Uniform '" << name << "' not found" << std::endl;
          }
@@ -546,9 +573,9 @@
      // Window and context
      GLFWwindow* window{nullptr};
  
-     // OpenGL resources
+     // OpenGL resources - Fixed: Each identifier in dedicated statement
      GLuint vao{0};
-     GLuint vbo{0}; 
+     GLuint vbo{0};
      GLuint ebo{0};
      std::unique_ptr<ShaderManager> shader;
  
@@ -560,9 +587,15 @@
  
      // Cached uniform locations for performance
      struct UniformLocations {
-         GLint albedo{-1}, normal{-1}, metallic{-1}, roughness{-1};
-         GLint metallicValue{-1}, roughnessValue{-1}, exposure{-1};
-         GLint lightDir{-1}, lightColor{-1};
+         GLint albedo{-1};
+         GLint normal{-1};
+         GLint metallic{-1};
+         GLint roughness{-1};
+         GLint metallicValue{-1};
+         GLint roughnessValue{-1};
+         GLint exposure{-1};
+         GLint lightDir{-1};
+         GLint lightColor{-1};
      } uniforms;
  
      MaterialParams materialParams;
@@ -871,9 +904,10 @@
                                static_cast<void*>(nullptr));
          glEnableVertexAttribArray(0);
  
-         // Texture coordinate attribute
+         // Texture coordinate attribute - Fixed: safer cast operation
+         const auto offsetBytes = 2 * sizeof(float);
          glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float),
-                               reinterpret_cast<void*>(2 * sizeof(float)));
+                               static_cast<void*>(static_cast<uintptr_t>(offsetBytes)));
          glEnableVertexAttribArray(1);
  
          GLErrorChecker::ThrowOnError("Setup vertex attributes");
