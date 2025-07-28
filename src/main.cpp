@@ -596,7 +596,9 @@
          GLint exposure{-1};
          GLint lightDir{-1};
          GLint lightColor{-1};
-     } uniforms;
+     };
+
+     UniformLocations uniforms;
  
      MaterialParams materialParams;
  
